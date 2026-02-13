@@ -4,7 +4,7 @@ const jwt = require("jsonwebtoken");
 const db = require("../db");
 
 const router = express.Router();
-const JWT_SECRET = "ping_secret_key";
+const JWT_SECRET = "ping_secret_key"; // auth.js와 동일해야 함
 
 // ✅ ADMIN만 통과
 function requireAdmin(req, res, next) {
@@ -35,14 +35,30 @@ router.use(requireAdmin);
  * --------------------------------------------------------------------
  * USERS
  * --------------------------------------------------------------------
+ * GET /admin/users  (※ app.use('/api/admin', router)라면 최종: /api/admin/users)
  */
 router.get("/users", (req, res) => {
   const sql = `
     SELECT
-      user_no, user_id, user_nickname, user_intro, user_grade, user_role, create_datetime
-    FROM pin_users
-    ORDER BY user_no DESC
+      u.user_no,
+      u.user_id,
+      u.user_nickname,
+      u.user_intro,
+      u.user_grade,
+      u.user_role,
+      u.create_datetime,
+      COUNT(DISTINCT p.post_no)   AS designs,
+      COUNT(DISTINCT q.pin_no)    AS pins,
+      COUNT(DISTINCT a.answer_no) AS comments
+    FROM pin_users u
+    LEFT JOIN pin_posts p ON p.user_no = u.user_no
+    LEFT JOIN pin_questions q ON q.post_no = p.post_no
+    LEFT JOIN pin_answers a ON a.pin_no = q.pin_no
+    GROUP BY
+      u.user_no, u.user_id, u.user_nickname, u.user_intro, u.user_grade, u.user_role, u.create_datetime
+    ORDER BY u.user_no DESC
   `;
+
   db.query(sql, (err, rows) => {
     if (err) {
       console.error("[admin/users] DB 오류:", err);
@@ -53,13 +69,45 @@ router.get("/users", (req, res) => {
 });
 
 /**
- * --------------------------------------------------------------------
- * POSTS (디자인 관리)
- * - 프론트가 GET /admin/posts 를 호출하니까 반드시 있어야 함
- * --------------------------------------------------------------------
+ * DELETE /admin/users/:id
+ * - 유저 완전 삭제 (CASCADE 전제)
+ * - 자기 자신 삭제 방지
  */
+router.delete("/users/:id", (req, res) => {
+  const userNo = Number(req.params.id);
+  if (!userNo) return res.status(400).json({ message: "유효하지 않은 사용자 ID" });
+
+  // 자기 자신 삭제 방지
+  if (String(req.user.user_no) === String(userNo)) {
+    return res.status(403).json({ message: "본인 계정은 삭제할 수 없습니다." });
+  }
+
+  db.query("SELECT user_no FROM pin_users WHERE user_no = ?", [userNo], (selErr, rows) => {
+    if (selErr) {
+      console.error("[admin/users/delete] 조회 실패:", selErr);
+      return res.status(500).json({ message: "DB 오류(조회)" });
+    }
+    if (!rows.length) {
+      return res.status(404).json({ message: "존재하지 않는 사용자" });
+    }
+
+    db.query("DELETE FROM pin_users WHERE user_no = ?", [userNo], (delErr, result) => {
+      if (delErr) {
+        console.error("[admin/users/delete] 삭제 실패:", delErr);
+        return res.status(500).json({ message: "회원 삭제 실패" });
+      }
+      if (!result.affectedRows) {
+        return res.status(404).json({ message: "사용자를 찾을 수 없습니다." });
+      }
+      res.json({ success: true });
+    });
+  });
+});
 
 /**
+ * --------------------------------------------------------------------
+ * POSTS (디자인 관리)
+ * --------------------------------------------------------------------
  * GET /admin/posts
  */
 router.get("/posts", (req, res) => {
@@ -93,16 +141,15 @@ router.get("/posts", (req, res) => {
  * - 관련 자식 레코드까지 안전하게 삭제
  */
 router.delete("/posts/:id", (req, res) => {
-  const id = parseInt(req.params.id, 10);
+  const id = Number(req.params.id);
   if (!id) return res.status(400).json({ message: "유효하지 않은 id" });
 
-  // 먼저 존재 여부 확인
   db.query("SELECT post_no FROM pin_posts WHERE post_no = ?", [id], (selErr, rows) => {
     if (selErr) {
       console.error("[admin/posts/delete] 게시물 조회 실패:", selErr);
       return res.status(500).json({ message: "게시물 조회 실패" });
     }
-    if (!rows || rows.length === 0) {
+    if (!rows.length) {
       return res.status(404).json({ message: "대상 게시물을 찾을 수 없습니다." });
     }
 
@@ -123,8 +170,7 @@ router.delete("/posts/:id", (req, res) => {
           params: [id],
         },
         { sql: "DELETE FROM pin_questions WHERE post_no = ?", params: [id] },
-        { sql: "DELETE FROM pin_images WHERE post_no = ?", params: [id] },
-        // ✅ 너 DB 스샷 기준: pin_post_categories / 컬럼 post_no, category_no
+        { sql: "DELETE FROM pin_post_images WHERE post_no = ?", params: [id] },
         { sql: "DELETE FROM pin_post_categories WHERE post_no = ?", params: [id] },
         { sql: "DELETE FROM pin_posts WHERE post_no = ?", params: [id] },
       ];
@@ -172,7 +218,7 @@ router.delete("/posts/:id", (req, res) => {
 
 /**
  * --------------------------------------------------------------------
- * CATEGORY GROUPS (pin_category_groups)
+ * CATEGORY GROUPS
  * --------------------------------------------------------------------
  */
 router.get("/category-groups", (req, res) => {
@@ -190,50 +236,9 @@ router.get("/category-groups", (req, res) => {
   });
 });
 
-
-/**
- * DELETE /admin/users/:id
- * - 유저 영구 비활성화
- */
-router.delete("/users/:id", (req, res) => {
-  const id = Number(req.params.id);
-
-  if (!id) {
-    return res.status(400).json({ message: "유효하지 않은 id" });
-  }
-
-  db.query(
-    "SELECT user_no FROM pin_users WHERE user_no = ?",
-    [id],
-    (selErr, rows) => {
-      if (selErr) {
-        console.error("[admin/users/delete] 조회 실패:", selErr);
-        return res.status(500).json({ message: "DB 오류(조회)" });
-      }
-
-      if (!rows.length) {
-        return res.status(404).json({ message: "존재하지 않는 사용자" });
-      }
-
-      db.query(
-        "UPDATE pin_users SET user_status = 'inactive' WHERE user_no = ?",
-        [id],
-        (delErr) => {
-          if (delErr) {
-            console.error("[admin/users/delete] 삭제 실패:", delErr);
-            return res.status(500).json({ message: "DB 오류(삭제)" });
-          }
-
-          res.json({ success: true });
-        }
-      );
-    }
-  );
-});
-
 /**
  * --------------------------------------------------------------------
- * CATEGORIES (pin_categories)
+ * CATEGORIES
  * --------------------------------------------------------------------
  */
 router.get("/categories", (req, res) => {
@@ -326,50 +331,46 @@ router.put("/categories/:categoryNo", (req, res) => {
     return res.status(400).json({ message: "값이 올바르지 않습니다." });
   }
 
-  db.query(
-    `SELECT 1 FROM pin_categories WHERE category_no = ? LIMIT 1`,
-    [categoryNo],
-    (exErr, exRows) => {
-      if (exErr) {
-        console.error("[admin/categories] 존재 확인 오류:", exErr);
-        return res.status(500).json({ message: "DB 오류(존재 확인)" });
-      }
-      if (!exRows.length) {
-        return res.status(404).json({ message: "존재하지 않는 문제 유형입니다." });
-      }
-
-      db.query(
-        `
-        SELECT 1
-        FROM pin_categories
-        WHERE group_no = ? AND category_name = ? AND category_no <> ?
-        LIMIT 1
-        `,
-        [group_no, category_name, categoryNo],
-        (dupErr, dupRows) => {
-          if (dupErr) {
-            console.error("[admin/categories] 중복 확인 오류:", dupErr);
-            return res.status(500).json({ message: "DB 오류(중복 확인)" });
-          }
-          if (dupRows.length) {
-            return res.status(409).json({ message: "이미 존재하는 문제 유형입니다." });
-          }
-
-          db.query(
-            `UPDATE pin_categories SET group_no = ?, category_name = ? WHERE category_no = ?`,
-            [group_no, category_name, categoryNo],
-            (upErr) => {
-              if (upErr) {
-                console.error("[admin/categories] 수정 오류:", upErr);
-                return res.status(500).json({ message: "DB 오류(수정)" });
-              }
-              res.json({ success: true });
-            }
-          );
-        }
-      );
+  db.query(`SELECT 1 FROM pin_categories WHERE category_no = ? LIMIT 1`, [categoryNo], (exErr, exRows) => {
+    if (exErr) {
+      console.error("[admin/categories] 존재 확인 오류:", exErr);
+      return res.status(500).json({ message: "DB 오류(존재 확인)" });
     }
-  );
+    if (!exRows.length) {
+      return res.status(404).json({ message: "존재하지 않는 문제 유형입니다." });
+    }
+
+    db.query(
+      `
+      SELECT 1
+      FROM pin_categories
+      WHERE group_no = ? AND category_name = ? AND category_no <> ?
+      LIMIT 1
+      `,
+      [group_no, category_name, categoryNo],
+      (dupErr, dupRows) => {
+        if (dupErr) {
+          console.error("[admin/categories] 중복 확인 오류:", dupErr);
+          return res.status(500).json({ message: "DB 오류(중복 확인)" });
+        }
+        if (dupRows.length) {
+          return res.status(409).json({ message: "이미 존재하는 문제 유형입니다." });
+        }
+
+        db.query(
+          `UPDATE pin_categories SET group_no = ?, category_name = ? WHERE category_no = ?`,
+          [group_no, category_name, categoryNo],
+          (upErr) => {
+            if (upErr) {
+              console.error("[admin/categories] 수정 오류:", upErr);
+              return res.status(500).json({ message: "DB 오류(수정)" });
+            }
+            res.json({ success: true });
+          }
+        );
+      }
+    );
+  });
 });
 
 router.patch("/categories/:categoryNo/status", (req, res) => {
