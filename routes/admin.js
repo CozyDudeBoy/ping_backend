@@ -190,6 +190,47 @@ router.get("/category-groups", (req, res) => {
   });
 });
 
+
+/**
+ * DELETE /admin/users/:id
+ * - 유저 영구 비활성화
+ */
+router.delete("/users/:id", (req, res) => {
+  const id = Number(req.params.id);
+
+  if (!id) {
+    return res.status(400).json({ message: "유효하지 않은 id" });
+  }
+
+  db.query(
+    "SELECT user_no FROM pin_users WHERE user_no = ?",
+    [id],
+    (selErr, rows) => {
+      if (selErr) {
+        console.error("[admin/users/delete] 조회 실패:", selErr);
+        return res.status(500).json({ message: "DB 오류(조회)" });
+      }
+
+      if (!rows.length) {
+        return res.status(404).json({ message: "존재하지 않는 사용자" });
+      }
+
+      db.query(
+        "UPDATE pin_users SET user_status = 'inactive' WHERE user_no = ?",
+        [id],
+        (delErr) => {
+          if (delErr) {
+            console.error("[admin/users/delete] 삭제 실패:", delErr);
+            return res.status(500).json({ message: "DB 오류(삭제)" });
+          }
+
+          res.json({ success: true });
+        }
+      );
+    }
+  );
+});
+
 /**
  * --------------------------------------------------------------------
  * CATEGORIES (pin_categories)
