@@ -74,6 +74,7 @@ router.get("/users", (req, res) => {
  * - 자기 자신 삭제 방지
  */
 router.delete("/users/:id", (req, res) => {
+  console.log("🔥 DELETE 라우터 진입");
   const userNo = Number(req.params.id);
   if (!userNo) return res.status(400).json({ message: "유효하지 않은 사용자 ID" });
 
